@@ -10,12 +10,11 @@ on:
       model:
         description: 'Model Gemma 4 variant (ollama tag)'
         required: true
-        default: 'gemma4:4b'
+        default: 'gemma4:e2b'
         type: choice
         options:
-          - 'gemma4:1b'
-          - 'gemma4:4b'
-          - 'gemma4:12b'
+          - 'gemma4:e2b'
+          - 'gemma4:e4b'
       max_tokens:
         description: 'Max tokens'
         required: false
@@ -24,13 +23,11 @@ on:
 env:
   OLLAMA_HOST: 127.0.0.1:11434
   PYTHONUNBUFFERED: "1"
-  # Giới hạn Ollama dùng tối đa 4 threads, tránh chiếm hết CPU
   OLLAMA_NUM_THREADS: "4"
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    # Tăng timeout vì CPU inference vẫn chậm
     timeout-minutes: 45
 
     steps:
@@ -65,7 +62,6 @@ jobs:
 
       - name: 🚀 Start Ollama server (background)
         run: |
-          # Kill systemd ollama nếu có (tránh port conflict)
           sudo systemctl stop ollama 2>/dev/null || true
           ollama serve &
           echo "OLLAMA_PID=$!" >> $GITHUB_ENV
@@ -78,7 +74,6 @@ jobs:
           ollama pull ${{ github.event.inputs.model }}
           echo "Model pulled successfully"
           ollama list
-          # Kiểm tra dung lượng model để debug
           du -sh ~/.ollama/models/ 2>/dev/null || true
 
       - name: 📦 Install dependencies
@@ -109,7 +104,7 @@ jobs:
           max_tokens = ${{ github.event.inputs.max_tokens }}
           temperature = 0.0
 
-          # Browser MUST run headless on GitHub Actions (no display server)
+          # Browser MUST run headless on GitHub Actions
           [browser]
           headless = true
           disable_security = true
