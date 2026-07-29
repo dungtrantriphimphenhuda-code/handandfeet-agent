@@ -15,37 +15,36 @@ on:
         options:
           - 'gemma4:1b'
           - 'gemma4:4b'
-          - 'gemma4:e4b'
+          - 'gemma4:12b'
       max_tokens:
         description: 'Max tokens'
         required: false
-        default: '4096'
+        default: '2048'
 
 env:
   OLLAMA_HOST: 127.0.0.1:11434
   PYTHONUNBUFFERED: "1"
+  # Giới hạn Ollama dùng tối đa 4 threads, tránh chiếm hết CPU
+  OLLAMA_NUM_THREADS: "4"
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Tăng timeout vì CPU inference vẫn chậm
+    timeout-minutes: 45
 
     steps:
-      # ── 1. Checkout code ──
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Cache Ollama models để lần sau pull nhanh hơn ──
       - name: 💾 Cache Ollama models
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.ollama/models
+          path: ~/.ollama/models
           key: ollama-models-${{ github.event.inputs.model }}-${{ runner.os }}
           restore-keys: |
             ollama-models-${{ github.event.inputs.model }}-
 
-      # ── 3. Cache pip dependencies ──
       - name: 💾 Cache pip packages
         uses: actions/cache@v4
         with:
@@ -54,48 +53,44 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
 
-      # ── 4. Setup Python ──
       - name: 🐍 Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # ── 5. Install Ollama ──
       - name: 🔧 Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           ollama --version
 
-      # ── 6. Start Ollama server (background) ──
-      - name: 🚀 Start Ollama server
+      - name: 🚀 Start Ollama server (background)
         run: |
+          # Kill systemd ollama nếu có (tránh port conflict)
+          sudo systemctl stop ollama 2>/dev/null || true
           ollama serve &
           echo "OLLAMA_PID=$!" >> $GITHUB_ENV
           sleep 5
-          # Verify server is up
           curl -s http://localhost:11434/api/tags | head -c 200 || true
 
-      # ── 7. Pull Gemma 4 model ──
       - name: ⬇️ Pull Gemma 4 model
         run: |
           echo "Pulling ${{ github.event.inputs.model }}..."
           ollama pull ${{ github.event.inputs.model }}
           echo "Model pulled successfully"
           ollama list
+          # Kiểm tra dung lượng model để debug
+          du -sh ~/.ollama/models/ 2>/dev/null || true
 
-      # ── 8. Install project dependencies ──
       - name: 📦 Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          # Playwright browsers (optional, cho tool browser automation)
           playwright install chromium || true
 
-      # ── 9. Create config.toml (Ollama local, no API key needed) ──
-      - name: ⚙️ Create config.toml
+      - name: ⚙️ Create config.toml (Ollama local + headless browser)
         run: |
           mkdir -p config
-          cat > config/config.toml << 'EOF'
+          cat > config/config.toml << EOF
           # Global LLM configuration — Local Ollama (no API key required)
           [llm]
           api_type = "ollama"
@@ -105,7 +100,7 @@ jobs:
           max_tokens = ${{ github.event.inputs.max_tokens }}
           temperature = 0.0
 
-          # Vision model (dùng cùng Ollama nếu model hỗ trợ multimodal)
+          # Vision model
           [llm.vision]
           api_type = "ollama"
           model = "${{ github.event.inputs.model }}"
@@ -113,6 +108,11 @@ jobs:
           api_key = "ollama"
           max_tokens = ${{ github.event.inputs.max_tokens }}
           temperature = 0.0
+
+          # Browser MUST run headless on GitHub Actions (no display server)
+          [browser]
+          headless = true
+          disable_security = true
 
           # MCP configuration
           [mcp]
@@ -125,13 +125,11 @@ jobs:
           echo "Config created:"
           cat config/config.toml
 
-      # ── 10. Run OpenManus agent ──
       - name: 🧠 Run OpenManus Agent
         run: |
           echo "Running with prompt: ${{ github.event.inputs.prompt }}"
           python main.py --prompt "${{ github.event.inputs.prompt }}"
 
-      # ── 11. Upload artifacts (logs, outputs) ──
       - name: 📤 Upload outputs
         if: always()
         uses: actions/upload-artifact@v4
@@ -143,7 +141,6 @@ jobs:
             *.log
           if-no-files-found: ignore
 
-      # ── 12. Cleanup Ollama ──
       - name: 🧹 Cleanup
         if: always()
         run: |
