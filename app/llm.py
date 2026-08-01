@@ -196,6 +196,7 @@ class LLM:
             self.api_key = llm_config.api_key
             self.api_version = llm_config.api_version
             self.base_url = llm_config.base_url
+            self.reasoning_effort = getattr(llm_config, "reasoning_effort", None)
 
             # Add token counting related attributes
             self.total_input_tokens = 0
@@ -416,6 +417,9 @@ class LLM:
                     temperature if temperature is not None else self.temperature
                 )
 
+            if self.reasoning_effort:
+                params["extra_body"] = {"reasoning_effort": self.reasoning_effort}
+
             if not stream:
                 # Non-streaming request
                 response = await self.client.chat.completions.create(
@@ -588,6 +592,9 @@ class LLM:
                     temperature if temperature is not None else self.temperature
                 )
 
+            if self.reasoning_effort:
+                params["extra_body"] = {"reasoning_effort": self.reasoning_effort}
+
             # Handle non-streaming request
             if not stream:
                 response = await self.client.chat.completions.create(**params)
@@ -727,6 +734,9 @@ class LLM:
                 params["temperature"] = (
                     temperature if temperature is not None else self.temperature
                 )
+
+            if self.reasoning_effort:
+                params["extra_body"] = {"reasoning_effort": self.reasoning_effort}
 
             params["stream"] = False  # Always use non-streaming for tool requests
             response: ChatCompletion = await self.client.chat.completions.create(
