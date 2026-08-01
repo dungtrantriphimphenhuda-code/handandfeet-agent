@@ -10,29 +10,66 @@ on:
       model:
         description: 'Model Gemma 4 variant (ollama tag)'
         required: true
-        default: 'gemma4:e2b'
+        default: 'gemma4:12b-it-qat'
         type: choice
         options:
-          - 'gemma4:e2b'
+          - 'gemma4:12b-it-qat'
+          - 'gemma4:e4b-it-qat'
+          - 'gemma4:e2b-it-qat'
           - 'gemma4:e4b'
+          - 'gemma4:e2b'
+      reasoning_effort:
+        description: 'Độ sâu thinking (Gemma 4 QAT hỗ trợ reasoning). "high" = suy nghĩ sâu nhất nhưng chậm nhất'
+        required: true
+        default: 'high'
+        type: choice
+        options:
+          - 'high'
+          - 'medium'
+          - 'low'
+          - 'none'
       max_tokens:
-        description: 'Max tokens'
+        description: 'Max output tokens mỗi lượt (bao gồm cả phần thinking) - để cao vì thinking token cũng tính vào đây, thấp quá sẽ bị cắt ngang khi đang suy nghĩ và trả về rỗng'
         required: false
-        default: '2048'
+        default: '32768'
+      num_ctx:
+        description: 'Context window (num_ctx). Gemma 4 12B QAT hỗ trợ tối đa 262144 (256K) nhưng RAM runner GitHub (~16GB) khó tải nổi full context -> mặc định để 131072, tăng lên 262144 nếu muốn tối đa và chấp nhận rủi ro OOM'
+        required: false
+        default: '131072'
 
 env:
   OLLAMA_HOST: 127.0.0.1:11434
   PYTHONUNBUFFERED: "1"
-  OLLAMA_NUM_THREADS: "4"
+  # 12B QAT nặng hơn e2b/e4b nhiều -> giữ model trong RAM suốt job, không load song song model khác
+  OLLAMA_MAX_LOADED_MODELS: "1"
+  OLLAMA_KEEP_ALIVE: "30m"
+  OLLAMA_CONTEXT_LENGTH: ${{ github.event.inputs.num_ctx }}
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Bỏ timeout-minutes để không tự ngắt agent giữa chừng khi nó đang thinking sâu.
+    # Lưu ý: GitHub Actions luôn có trần cứng 360 phút (6h) cho job trên runner GitHub-hosted,
+    # trần này không cấu hình được và sẽ áp dụng dù không khai báo timeout-minutes ở đây.
 
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
+
+      - name: 🧹 Free up disk space (cần chỗ cho model 7GB+)
+        run: |
+          echo "Disk trước khi dọn:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune -a -f 2>/dev/null || true
+          echo "Disk sau khi dọn:"
+          df -h /
+
+      - name: 🧠 Show runner resources
+        run: |
+          echo "CPU cores: $(nproc)"
+          free -h
+          echo "OLLAMA_NUM_THREADS=$(nproc)" >> $GITHUB_ENV
 
       - name: 💾 Cache Ollama models
         uses: actions/cache@v4
@@ -63,24 +100,49 @@ jobs:
       - name: 🚀 Start Ollama server (background)
         run: |
           sudo systemctl stop ollama 2>/dev/null || true
-          ollama serve &
+          nohup ollama serve > ollama-server.log 2>&1 &
           echo "OLLAMA_PID=$!" >> $GITHUB_ENV
-          sleep 5
-          curl -s http://localhost:11434/api/tags | head -c 200 || true
 
-      - name: ⬇️ Pull Gemma 4 model
+          echo "⏳ Đợi Ollama server sẵn sàng..."
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:11434/api/tags | grep -q "200"; then
+              echo "✅ Ollama server đã sẵn sàng sau ${i}s"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "❌ Ollama server không khởi động được sau 30s"
+              cat ollama-server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -s http://localhost:11434/api/tags
+
+      - name: ⬇️ Pull Gemma 4 model (retry tối đa 3 lần)
         run: |
-          echo "Pulling ${{ github.event.inputs.model }}..."
-          ollama pull ${{ github.event.inputs.model }}
-          echo "Model pulled successfully"
+          MODEL="${{ github.event.inputs.model }}"
+          echo "Pulling $MODEL..."
+          for attempt in 1 2 3; do
+            if ollama pull "$MODEL"; then
+              echo "✅ Pull thành công (lần $attempt)"
+              break
+            fi
+            echo "⚠️ Pull thất bại lần $attempt"
+            if [ "$attempt" -eq 3 ]; then
+              echo "❌ Pull model thất bại sau 3 lần thử"
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
           ollama list
           du -sh ~/.ollama/models/ 2>/dev/null || true
+          df -h /
 
       - name: 📦 Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install chromium || true
+          playwright install chromium --with-deps || playwright install chromium || true
 
       - name: ⚙️ Create config.toml (Ollama local + headless browser)
         run: |
@@ -94,8 +156,9 @@ jobs:
           api_key = "ollama"
           max_tokens = ${{ github.event.inputs.max_tokens }}
           temperature = 0.0
+          reasoning_effort = "${{ github.event.inputs.reasoning_effort }}"
 
-          # Vision model
+          # Vision model (Gemma 4 12B/e4b/e2b QAT đều hỗ trợ multimodal)
           [llm.vision]
           api_type = "ollama"
           model = "${{ github.event.inputs.model }}"
@@ -103,6 +166,7 @@ jobs:
           api_key = "ollama"
           max_tokens = ${{ github.event.inputs.max_tokens }}
           temperature = 0.0
+          reasoning_effort = "${{ github.event.inputs.reasoning_effort }}"
 
           # Browser MUST run headless on GitHub Actions
           [browser]
@@ -120,9 +184,28 @@ jobs:
           echo "Config created:"
           cat config/config.toml
 
+      - name: 🩺 Warm-up / sanity check model trước khi chạy agent
+        run: |
+          MODEL="${{ github.event.inputs.model }}"
+          echo "Warm-up model $MODEL (reasoning_effort=${{ github.event.inputs.reasoning_effort }}, num_ctx=${{ github.event.inputs.num_ctx }})..."
+          # Gọi qua endpoint OpenAI-compat giống hệt app dùng, để phát hiện sớm nếu bị OOM
+          # hoặc gặp lỗi content rỗng do thinking ăn hết max_tokens trước khi ra câu trả lời cuối.
+          RESP=$(time curl -s http://localhost:11434/v1/chat/completions -d "{
+            \"model\": \"$MODEL\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"Xin chào, bạn là ai?\"}],
+            \"max_tokens\": ${{ github.event.inputs.max_tokens }},
+            \"reasoning_effort\": \"${{ github.event.inputs.reasoning_effort }}\"
+          }")
+          echo "$RESP" | head -c 1000
+          echo ""
+          echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['choices'][0]['message'].get('content'); sys.exit(0 if c else 1)" \
+            && echo "✅ content trả về không rỗng" \
+            || { echo "⚠️ CẢNH BÁO: content rỗng khi warm-up (thinking có thể đã ăn hết max_tokens, hoặc model bị OOM). Cân nhắc tăng max_tokens hoặc giảm num_ctx/reasoning_effort."; }
+
       - name: 🧠 Run OpenManus Agent
         run: |
           echo "Running with prompt: ${{ github.event.inputs.prompt }}"
+          echo "Model: ${{ github.event.inputs.model }} | num_ctx: ${{ github.event.inputs.num_ctx }} | max_tokens: ${{ github.event.inputs.max_tokens }} | reasoning_effort: ${{ github.event.inputs.reasoning_effort }}"
           python main.py --prompt "${{ github.event.inputs.prompt }}"
 
       - name: 📤 Upload outputs
