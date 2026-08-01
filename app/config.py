@@ -28,6 +28,10 @@ class LLMSettings(BaseModel):
     temperature: float = Field(1.0, description="Sampling temperature")
     api_type: str = Field(..., description="Azure, Openai, or Ollama")
     api_version: str = Field(..., description="Azure Openai version if AzureOpenai")
+    reasoning_effort: Optional[str] = Field(
+        None,
+        description="Thinking depth for reasoning-capable models (e.g. Gemma 4 QAT via Ollama): 'low', 'medium', 'high', or 'none'. Sent as extra_body.reasoning_effort. Leave unset for models that don't support it.",
+    )
 
 
 class ProxySettings(BaseModel):
